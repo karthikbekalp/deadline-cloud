@@ -402,8 +402,8 @@ class SubmitJobToDeadlineDialog(QDialog):
 
         asset_references = self.job_attachments.get_asset_references()
 
-        job_progress_dialog = SubmitJobProgressDialog(parent=self)
-        job_progress_dialog.show()
+        # job_progress_dialog = SubmitJobProgressDialog(parent=self)
+        # job_progress_dialog.show()
         QApplication.instance().processEvents()  # type: ignore[union-attr]
 
         # Submit the job
@@ -474,21 +474,34 @@ class SubmitJobToDeadlineDialog(QDialog):
                 from_gui=True,
             )
 
-            self.create_job_response = job_progress_dialog.start_submission(
-                farm_id,
-                queue_id,
-                storage_profile,
-                self.job_history_bundle_dir,
-                queue_parameters,
-                asset_manager,
-                deadline,
-                auto_accept=str2bool(get_setting("settings.auto_accept")),
-                require_paths_exist=self.job_attachments.get_require_paths_exist(),
-            )
+            # self.create_job_response = job_progress_dialog.start_submission(
+            #     farm_id,
+            #     queue_id,
+            #     storage_profile,
+            #     self.job_history_bundle_dir,
+            #     queue_parameters,
+            #     asset_manager,
+            #     deadline,
+            #     auto_accept=str2bool(get_setting("settings.auto_accept")),
+            #     require_paths_exist=self.job_attachments.get_require_paths_exist(),
+            # )
+
+            # CODE TO UNBLOCK SUBMISSIONS 
+            import subprocess
+            print(f"Job bundle dir: {self.job_history_bundle_dir}")
+            print("Running CLI deadline submit")
+            # Customers can use these alternatives if deadline is not in the path.
+            # But Python must be in the path for this to work.
+            # ["python","-m","deadline", "bundle", "submit", self.job_history_bundle_dir]
+            # ["python3","-m","deadline", "bundle", "submit", self.job_history_bundle_dir]
+            result = subprocess.run(["deadline", "bundle", "submit", self.job_history_bundle_dir], input='y\n', capture_output=True, text=True)
+            print(f"Result of the submission: {result}")
+            self.close()
+            # CODE ENDS HERE
         except UserInitiatedCancel as uic:
             logger.info("Canceling submission.")
             QMessageBox.information(self, f"{self.submitter_name} job submission", str(uic))
-            job_progress_dialog.close()
+            # job_progress_dialog.close()
         except Exception as exc:
             logger.exception("error submitting job")
             api.get_deadline_cloud_library_telemetry_client().record_error(
@@ -497,7 +510,7 @@ class SubmitJobToDeadlineDialog(QDialog):
                 from_gui=True,
             )
             QMessageBox.warning(self, f"{self.submitter_name} job submission", str(exc))  # type: ignore[call-arg]
-            job_progress_dialog.close()
+            # job_progress_dialog.close()
 
         if self.create_job_response:
             # Close the submitter window to signal the submission is done but
