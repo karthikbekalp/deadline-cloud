@@ -20,6 +20,7 @@ __all__ = [
 
 import json
 import logging
+import os
 import socket
 import ssl
 import sys
@@ -38,6 +39,9 @@ MANIFEST_URL = "https://downloads.deadlinecloud.amazonaws.com/submitters/manifes
 MANIFEST_TIMEOUT_SECONDS = 5
 # Base URL for installer downloads, derived from the manifest URL's parent path
 DOWNLOAD_BASE_URL = MANIFEST_URL.rsplit("/", 1)[0]
+# Bundled Amazon Root CA 1 certificate for environments where the system
+# certificate store is unavailable (e.g. Cinema 4D's Python on macOS).
+_BUNDLED_CA_CERT = os.path.join(os.path.dirname(__file__), "_certs", "AmazonRootCA1.pem")
 
 
 class UpdateCheckStatus(Enum):
@@ -100,10 +104,9 @@ def _fetch_manifest() -> Dict[str, Any]:
     """Fetch and parse the remote manifest JSON.
 
     On macOS, bundled Python environments (e.g. inside Cinema 4D) often
-    cannot locate CA certificates, causing SSL verification failures.
-    Since the manifest is a read-only public JSON file fetched from a
-    hardcoded Amazon-owned URL with no credentials transmitted, SSL
-    verification is skipped on macOS to avoid this issue.
+    cannot locate the system CA certificate store.  When the default SSL
+    context fails, this function retries using a bundled Amazon Root CA 1
+    certificate so that the connection is still fully verified.
 
     Raises:
         urllib.error.URLError: On network errors.
@@ -114,15 +117,18 @@ def _fetch_manifest() -> Dict[str, Any]:
     """
     req = urllib.request.Request(MANIFEST_URL)
 
-    if sys.platform == "darwin":
-        # macOS bundled Python (e.g. Cinema 4D) lacks CA certs — skip verification
-        # for this non-sensitive, read-only manifest fetch.
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-    else:
-        ctx = None  # use default SSL context (verified) on Windows/Linux
+    try:
+        with urllib.request.urlopen(req, timeout=MANIFEST_TIMEOUT_SECONDS) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError:
+        if sys.platform != "darwin":
+            raise
 
+    # macOS fallback: retry with the bundled Amazon Root CA certificate.
+    logger.debug("Default SSL verification failed on macOS, retrying with bundled CA cert")
+    ctx = ssl.create_default_context()
+    ctx.load_verify_locations(_BUNDLED_CA_CERT)
+    req = urllib.request.Request(MANIFEST_URL)
     with urllib.request.urlopen(req, timeout=MANIFEST_TIMEOUT_SECONDS, context=ctx) as resp:
         return json.loads(resp.read().decode("utf-8"))
 

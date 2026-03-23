@@ -5,7 +5,6 @@ Tests for the deadline.client.api._update_checker module.
 """
 
 import json
-import ssl
 from unittest.mock import patch, MagicMock
 import socket
 import urllib.error
@@ -102,48 +101,58 @@ class TestFetchManifest:
     """Tests for _fetch_manifest() SSL context behavior."""
 
     @patch("deadline.client.api._update_checker.urllib.request.urlopen")
+    def test_success_default_ssl(self, mock_urlopen_fn):
+        """When default SSL works, no fallback is needed."""
+        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+
+        result = _fetch_manifest()
+
+        assert result == SAMPLE_MANIFEST
+        assert mock_urlopen_fn.call_count == 1
+
+    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
     @patch("deadline.client.api._update_checker.sys")
-    def test_macos_skips_ssl_verification(self, mock_sys, mock_urlopen_fn):
-        """On macOS, SSL verification is disabled for the manifest fetch."""
+    def test_macos_falls_back_to_bundled_ca(self, mock_sys, mock_urlopen_fn):
+        """On macOS, when default SSL fails, retries with bundled Amazon Root CA."""
         mock_sys.platform = "darwin"
-        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+        # First call fails with SSL error, second succeeds with bundled cert
+        mock_urlopen_fn.side_effect = [
+            urllib.error.URLError("SSL: CERTIFICATE_VERIFY_FAILED"),
+            _mock_urlopen(SAMPLE_MANIFEST),
+        ]
 
         result = _fetch_manifest()
 
         assert result == SAMPLE_MANIFEST
-        call_kwargs = mock_urlopen_fn.call_args
-        ctx = call_kwargs.kwargs.get("context") or call_kwargs[1].get("context")
+        assert mock_urlopen_fn.call_count == 2
+        # Second call should have an explicit SSL context
+        second_call_kwargs = mock_urlopen_fn.call_args_list[1]
+        ctx = second_call_kwargs.kwargs.get("context") or second_call_kwargs[1].get("context")
         assert ctx is not None
-        assert ctx.check_hostname is False
-        assert ctx.verify_mode == ssl.CERT_NONE
 
     @patch("deadline.client.api._update_checker.urllib.request.urlopen")
     @patch("deadline.client.api._update_checker.sys")
-    def test_linux_uses_default_ssl(self, mock_sys, mock_urlopen_fn):
-        """On Linux, no custom SSL context is passed (default verification)."""
+    def test_non_macos_does_not_fallback(self, mock_sys, mock_urlopen_fn):
+        """On non-macOS, SSL errors are raised without fallback."""
         mock_sys.platform = "linux"
-        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+        mock_urlopen_fn.side_effect = urllib.error.URLError("SSL: CERTIFICATE_VERIFY_FAILED")
 
-        result = _fetch_manifest()
+        with pytest.raises(urllib.error.URLError):
+            _fetch_manifest()
 
-        assert result == SAMPLE_MANIFEST
-        call_kwargs = mock_urlopen_fn.call_args
-        ctx = call_kwargs.kwargs.get("context") or call_kwargs[1].get("context")
-        assert ctx is None
+        assert mock_urlopen_fn.call_count == 1
 
     @patch("deadline.client.api._update_checker.urllib.request.urlopen")
     @patch("deadline.client.api._update_checker.sys")
-    def test_windows_uses_default_ssl(self, mock_sys, mock_urlopen_fn):
-        """On Windows, no custom SSL context is passed (default verification)."""
-        mock_sys.platform = "win32"
-        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+    def test_macos_fallback_also_fails(self, mock_sys, mock_urlopen_fn):
+        """On macOS, if both attempts fail, the error propagates."""
+        mock_sys.platform = "darwin"
+        mock_urlopen_fn.side_effect = urllib.error.URLError("SSL error")
 
-        result = _fetch_manifest()
+        with pytest.raises(urllib.error.URLError):
+            _fetch_manifest()
 
-        assert result == SAMPLE_MANIFEST
-        call_kwargs = mock_urlopen_fn.call_args
-        ctx = call_kwargs.kwargs.get("context") or call_kwargs[1].get("context")
-        assert ctx is None
+        assert mock_urlopen_fn.call_count == 2
 
 
 class TestCheckForUpdates:
