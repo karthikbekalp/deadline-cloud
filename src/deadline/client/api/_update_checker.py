@@ -21,6 +21,7 @@ __all__ = [
 import json
 import logging
 import socket
+import ssl
 import sys
 import urllib.request
 import urllib.error
@@ -98,8 +99,11 @@ def _is_update_notification_enabled() -> bool:
 def _fetch_manifest() -> Dict[str, Any]:
     """Fetch and parse the remote manifest JSON.
 
-    Returns:
-        The parsed manifest dictionary.
+    On macOS, bundled Python environments (e.g. inside Cinema 4D) often
+    cannot locate CA certificates, causing SSL verification failures.
+    Since the manifest is a read-only public JSON file fetched from a
+    hardcoded Amazon-owned URL with no credentials transmitted, SSL
+    verification is skipped on macOS to avoid this issue.
 
     Raises:
         urllib.error.URLError: On network errors.
@@ -109,7 +113,17 @@ def _fetch_manifest() -> Dict[str, Any]:
         UnicodeDecodeError: On encoding errors.
     """
     req = urllib.request.Request(MANIFEST_URL)
-    with urllib.request.urlopen(req, timeout=MANIFEST_TIMEOUT_SECONDS) as resp:
+
+    if sys.platform == "darwin":
+        # macOS bundled Python (e.g. Cinema 4D) lacks CA certs — skip verification
+        # for this non-sensitive, read-only manifest fetch.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    else:
+        ctx = None  # use default SSL context (verified) on Windows/Linux
+
+    with urllib.request.urlopen(req, timeout=MANIFEST_TIMEOUT_SECONDS, context=ctx) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 

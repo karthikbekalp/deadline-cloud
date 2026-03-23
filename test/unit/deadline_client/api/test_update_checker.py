@@ -5,6 +5,7 @@ Tests for the deadline.client.api._update_checker module.
 """
 
 import json
+import ssl
 from unittest.mock import patch, MagicMock
 import socket
 import urllib.error
@@ -15,6 +16,7 @@ from deadline.client.api._update_checker import (
     UpdateCheckStatus,
     check_for_updates,
     get_current_platform,
+    _fetch_manifest,
     DOWNLOAD_BASE_URL,
 )
 
@@ -96,13 +98,61 @@ PLATFORM_INSTALLER_URLS = {
 }
 
 
+class TestFetchManifest:
+    """Tests for _fetch_manifest() SSL context behavior."""
+
+    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
+    @patch("deadline.client.api._update_checker.sys")
+    def test_macos_skips_ssl_verification(self, mock_sys, mock_urlopen_fn):
+        """On macOS, SSL verification is disabled for the manifest fetch."""
+        mock_sys.platform = "darwin"
+        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+
+        result = _fetch_manifest()
+
+        assert result == SAMPLE_MANIFEST
+        call_kwargs = mock_urlopen_fn.call_args
+        ctx = call_kwargs.kwargs.get("context") or call_kwargs[1].get("context")
+        assert ctx is not None
+        assert ctx.check_hostname is False
+        assert ctx.verify_mode == ssl.CERT_NONE
+
+    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
+    @patch("deadline.client.api._update_checker.sys")
+    def test_linux_uses_default_ssl(self, mock_sys, mock_urlopen_fn):
+        """On Linux, no custom SSL context is passed (default verification)."""
+        mock_sys.platform = "linux"
+        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+
+        result = _fetch_manifest()
+
+        assert result == SAMPLE_MANIFEST
+        call_kwargs = mock_urlopen_fn.call_args
+        ctx = call_kwargs.kwargs.get("context") or call_kwargs[1].get("context")
+        assert ctx is None
+
+    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
+    @patch("deadline.client.api._update_checker.sys")
+    def test_windows_uses_default_ssl(self, mock_sys, mock_urlopen_fn):
+        """On Windows, no custom SSL context is passed (default verification)."""
+        mock_sys.platform = "win32"
+        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+
+        result = _fetch_manifest()
+
+        assert result == SAMPLE_MANIFEST
+        call_kwargs = mock_urlopen_fn.call_args
+        ctx = call_kwargs.kwargs.get("context") or call_kwargs[1].get("context")
+        assert ctx is None
+
+
 class TestCheckForUpdates:
     """Tests for check_for_updates()."""
 
     @pytest.mark.parametrize("platform", ["linux", "macos", "windows"])
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_update_available(self, mock_urlopen_fn, platform):
-        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_update_available(self, mock_fetch, platform):
+        mock_fetch.return_value = SAMPLE_MANIFEST
 
         with patch(
             "deadline.client.api._update_checker.get_current_platform", return_value=platform
@@ -116,9 +166,9 @@ class TestCheckForUpdates:
         assert result.download_url == PLATFORM_INSTALLER_URLS[platform]
 
     @pytest.mark.parametrize("platform", ["linux", "macos", "windows"])
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_no_update_available(self, mock_urlopen_fn, platform):
-        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_no_update_available(self, mock_fetch, platform):
+        mock_fetch.return_value = SAMPLE_MANIFEST
 
         with patch(
             "deadline.client.api._update_checker.get_current_platform", return_value=platform
@@ -130,9 +180,9 @@ class TestCheckForUpdates:
         assert result.latest_version == "0.10.0"
 
     @pytest.mark.parametrize("platform", ["linux", "macos", "windows"])
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_current_version_newer_than_manifest(self, mock_urlopen_fn, platform):
-        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_current_version_newer_than_manifest(self, mock_fetch, platform):
+        mock_fetch.return_value = SAMPLE_MANIFEST
 
         with patch(
             "deadline.client.api._update_checker.get_current_platform", return_value=platform
@@ -142,9 +192,9 @@ class TestCheckForUpdates:
         assert result.status == UpdateCheckStatus.SUCCESS
         assert result.update_available is False
 
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_network_error(self, mock_urlopen_fn):
-        mock_urlopen_fn.side_effect = urllib.error.URLError("Connection refused")
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_network_error(self, mock_fetch):
+        mock_fetch.side_effect = urllib.error.URLError("Connection refused")
 
         result = check_for_updates("deadline-cloud-for-cinema-4d", "0.9.1")
 
@@ -153,31 +203,27 @@ class TestCheckForUpdates:
         assert result.error_message is not None
         assert "Network error" in result.error_message
 
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_timeout_error(self, mock_urlopen_fn):
-        mock_urlopen_fn.side_effect = TimeoutError()
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_timeout_error(self, mock_fetch):
+        mock_fetch.side_effect = TimeoutError()
 
         result = check_for_updates("deadline-cloud-for-cinema-4d", "0.9.1")
 
         assert result.status == UpdateCheckStatus.TIMEOUT_ERROR
         assert result.update_available is False
 
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_socket_timeout_error(self, mock_urlopen_fn):
-        mock_urlopen_fn.side_effect = socket.timeout("timed out")
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_socket_timeout_error(self, mock_fetch):
+        mock_fetch.side_effect = socket.timeout("timed out")
 
         result = check_for_updates("deadline-cloud-for-cinema-4d", "0.9.1")
 
         assert result.status == UpdateCheckStatus.TIMEOUT_ERROR
         assert result.update_available is False
 
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_parse_error(self, mock_urlopen_fn):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b"not json"
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen_fn.return_value = mock_resp
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_parse_error(self, mock_fetch):
+        mock_fetch.side_effect = json.JSONDecodeError("bad json", "", 0)
 
         result = check_for_updates("deadline-cloud-for-cinema-4d", "0.9.1")
 
@@ -185,9 +231,9 @@ class TestCheckForUpdates:
         assert result.update_available is False
 
     @pytest.mark.parametrize("platform", ["linux", "macos", "windows"])
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_integration_not_found(self, mock_urlopen_fn, platform):
-        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_integration_not_found(self, mock_fetch, platform):
+        mock_fetch.return_value = SAMPLE_MANIFEST
 
         with patch(
             "deadline.client.api._update_checker.get_current_platform", return_value=platform
@@ -200,9 +246,9 @@ class TestCheckForUpdates:
         assert "not found" in result.error_message
 
     @patch("deadline.client.api._update_checker.get_current_platform", return_value="unknown_os")
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_platform_not_in_manifest(self, mock_urlopen_fn, mock_platform):
-        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_platform_not_in_manifest(self, mock_fetch, mock_platform):
+        mock_fetch.return_value = SAMPLE_MANIFEST
 
         result = check_for_updates("deadline-cloud-for-cinema-4d", "0.9.1")
 
@@ -211,8 +257,8 @@ class TestCheckForUpdates:
         assert "not found in manifest" in result.error_message
 
     @patch("deadline.client.api._update_checker.get_current_platform", return_value="macos")
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_invalid_version_in_manifest(self, mock_urlopen_fn, mock_platform):
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_invalid_version_in_manifest(self, mock_fetch, mock_platform):
         bad_manifest = {
             "DeadlineCloudSubmitter": {
                 "versions": {
@@ -226,7 +272,7 @@ class TestCheckForUpdates:
                 }
             }
         }
-        mock_urlopen_fn.return_value = _mock_urlopen(bad_manifest)
+        mock_fetch.return_value = bad_manifest
 
         result = check_for_updates("deadline-cloud-for-cinema-4d", "0.9.1")
 
@@ -234,8 +280,8 @@ class TestCheckForUpdates:
         assert result.update_available is False
 
     @patch("deadline.client.api._update_checker.get_current_platform", return_value="macos")
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_missing_installer_key_returns_no_download_url(self, mock_urlopen_fn, mock_platform):
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_missing_installer_key_returns_no_download_url(self, mock_fetch, mock_platform):
         manifest_without_installer = {
             "DeadlineCloudSubmitter": {
                 "versions": {
@@ -249,7 +295,7 @@ class TestCheckForUpdates:
                 }
             }
         }
-        mock_urlopen_fn.return_value = _mock_urlopen(manifest_without_installer)
+        mock_fetch.return_value = manifest_without_installer
 
         result = check_for_updates("deadline-cloud-for-cinema-4d", "0.9.1")
 
@@ -258,9 +304,9 @@ class TestCheckForUpdates:
         assert result.download_url is None
 
     @pytest.mark.parametrize("platform", ["linux", "macos", "windows"])
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_invalid_current_version_returns_error(self, mock_urlopen_fn, platform):
-        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_invalid_current_version_returns_error(self, mock_fetch, platform):
+        mock_fetch.return_value = SAMPLE_MANIFEST
 
         with patch(
             "deadline.client.api._update_checker.get_current_platform", return_value=platform
@@ -275,8 +321,8 @@ class TestCheckForUpdates:
 class TestConfigOptOut:
     """Tests for the settings.submitter_update_notification opt-out."""
 
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
-    def test_notification_suppressed(self, mock_urlopen_fn, fresh_deadline_config):
+    @patch("deadline.client.api._update_checker._fetch_manifest")
+    def test_notification_suppressed(self, mock_fetch, fresh_deadline_config):
         """When submitter_update_notification is false, check is skipped."""
         from deadline.client.config.config_file import set_setting
 
@@ -286,19 +332,18 @@ class TestConfigOptOut:
 
         assert result.status == UpdateCheckStatus.SUCCESS
         assert result.update_available is False
-        # Should not have fetched the manifest at all
-        mock_urlopen_fn.assert_not_called()
+        mock_fetch.assert_not_called()
 
     @patch("deadline.client.api._update_checker.get_current_platform", return_value="macos")
-    @patch("deadline.client.api._update_checker.urllib.request.urlopen")
+    @patch("deadline.client.api._update_checker._fetch_manifest")
     def test_notification_enabled_by_default(
-        self, mock_urlopen_fn, mock_platform, fresh_deadline_config
+        self, mock_fetch, mock_platform, fresh_deadline_config
     ):
         """When submitter_update_notification is default (true), check proceeds."""
-        mock_urlopen_fn.return_value = _mock_urlopen(SAMPLE_MANIFEST)
+        mock_fetch.return_value = SAMPLE_MANIFEST
 
         result = check_for_updates("deadline-cloud-for-cinema-4d", "0.9.1")
 
         assert result.status == UpdateCheckStatus.SUCCESS
         assert result.update_available is True
-        mock_urlopen_fn.assert_called_once()
+        mock_fetch.assert_called_once()
